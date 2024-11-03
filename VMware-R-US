@@ -1,0 +1,108 @@
+#!/bin/bash
+
+# Author: ThinkCode (Zurich)
+# Description: This script sets up VMware Workstation for any kernel version on Linux,
+# easing initial installation and ensuring compatibility with signed modules.
+
+# Variables
+filename_key="vmware_key"
+log_file="vmware_setup.log"
+kernel_version=$(uname -r)
+
+# Function to display a title with decorative borders
+function title() {
+    echo -e "\n\e[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\e[0m"
+    echo ""
+    echo -e "       🌟 $1 🌟"
+    echo ""    
+    echo -e "\e[1;34m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\e[0m\n"
+}
+
+# Check if running as root
+if [[ $EUID -ne 0 ]]; then
+   echo -e "\e[1;31mThis script must be run as root. Please use sudo.\e[0m" 
+   exit 1
+fi
+
+# Function to check dependencies
+function check_dependencies() {
+    dependencies=("vmware-modconfig" "openssl" "mokutil")
+    for dep in "${dependencies[@]}"; do
+        if ! command -v $dep &> /dev/null; then
+            echo -e "\e[1;31mDependency '$dep' not found. Do you want to install it? (y/n): \e[0m"
+            read -p "" resp
+            if [[ "$resp" == "y" ]]; then
+                sudo apt-get install -y $dep || { echo "Error installing $dep"; exit 1; }
+            else
+                echo -e "\e[1;31mThe script cannot continue without $dep. Exiting...\e[0m"
+                exit 1
+            fi
+        fi
+    done
+}
+
+# Show interactive menu
+function menu() {
+    title "Welcome to the VMware Module Installer and Configurator for Linux"
+    echo -e "Please select an option:\n"
+    echo -e "1) Install dependencies and configure modules"
+    echo -e "2) Generate and sign RSA keys for VMware modules"
+    echo -e "3) Verify module signatures"
+    echo -e "4) Import generated key into MOK"
+    echo -e "5) Exit"
+    read -p "Select an option (1-5): " option
+}
+
+# Function to install and configure modules
+function install_configuration() {
+    title "Installing necessary dependencies and configurations"
+    sudo vmware-modconfig --console --install-all | tee -a "$log_file"
+    echo -e "\e[1;32mDependencies and configuration completed.\e[0m"
+}
+
+# Function to generate RSA keys and sign modules
+function generate_signatures() {
+    title "Generating 2048-bit RSA keys to sign VMware modules"
+    openssl req -new -x509 -newkey rsa:2048 -keyout VMWARE1X.priv -outform DER -out VMWARE1X.der -nodes -days 36500 -subj "/CN=VMWARE/" | tee -a "$log_file"
+    echo -e "\e[1;36m🔏 Signing the vmmon module...\e[0m"
+    sudo /usr/src/linux-headers-$kernel_version/scripts/sign-file sha256 ./VMWARE1X.priv ./VMWARE1X.der $(modinfo -n vmmon) | tee -a "$log_file"
+    echo -e "\e[1;36m🔏 Signing the vmnet module...\e[0m"
+    sudo /usr/src/linux-headers-$kernel_version/scripts/sign-file sha256 ./VMWARE1X.priv ./VMWARE1X.der $(modinfo -n vmnet) | tee -a "$log_file"
+}
+
+# Function to verify module signatures
+function verify_signature() {
+    title "Verifying that signatures have been applied correctly"
+    if tail $(modinfo -n vmmon) | grep -q "Signature successfully added"; then
+        echo -e "\e[1;32m✅ vmmon signature applied successfully.\e[0m"
+    else
+        echo -e "\e[1;31m❌ vmmon signature was not applied correctly.\e[0m"
+    fi
+    if tail $(modinfo -n vmnet) | grep -q "Signature successfully added"; then
+        echo -e "\e[1;32m✅ vmnet signature applied successfully.\e[0m"
+    else
+        echo -e "\e[1;31m❌ vmnet signature was not applied correctly.\e[0m"
+    fi
+}
+
+# Function to import key into MOK
+function import_key() {
+    title "Importing the generated key into MOK to make it trusted"
+    sudo mokutil --import VMWARE1X.der | tee -a "$log_file"
+    echo -e "\e[1;32m🔑 Key successfully imported into MOK. Remember to reboot and follow the on-screen steps.\e[0m"
+}
+
+# Main menu loop
+while true; do
+    menu
+    case $option in
+        1) install_configuration ;;
+        2) generate_signatures ;;
+        3) verify_signature ;;
+        4) import_key ;;
+        5) echo -e "\e[1;32mExiting... Thank you for using the script!\e[0m"; break ;;
+        *) echo -e "\e[1;31mInvalid option. Please select between 1 and 5.\e[0m" ;;
+    esac
+    echo -e "\n\e[1;34mPress Enter to return to the main menu...\e[0m"
+    read -r
+done
